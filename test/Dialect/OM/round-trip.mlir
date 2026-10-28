@@ -179,6 +179,23 @@ om.class @ListConcat() {
   om.class.fields
 }
 
+// CHECK-LABEL: @ListContains
+om.class @ListContains() {
+  %s0 = om.constant "member" : !om.string
+  %strings = om.list_create %s0 : !om.string
+  // CHECK: om.list_contains {{.*}}, {{.*}} : <!om.string> loc({{.*}}){{$}}
+  %strResult = om.list_contains %strings, %s0 : !om.list<!om.string>
+  %i0 = om.constant #om.integer<1 : si2> : !om.integer
+  %integers = om.list_create %i0 : !om.integer
+  // CHECK: om.list_contains {{.*}}, {{.*}} : <!om.integer> loc({{.*}}){{$}}
+  %intResult = om.list_contains %integers, %i0 : !om.list<!om.integer>
+  %b0 = om.constant true
+  %booleans = om.list_create %b0 : i1
+  // CHECK: om.list_contains {{.*}}, {{.*}} : <i1> loc({{.*}}){{$}}
+  %boolResult = om.list_contains %booleans, %b0 : !om.list<i1>
+  om.class.fields
+}
+
 // CHECK-LABEL: @Integer
 // CHECK-SAME: -> (int: !om.integer)
 om.class @IntegerConstant() -> (int: !om.integer) {

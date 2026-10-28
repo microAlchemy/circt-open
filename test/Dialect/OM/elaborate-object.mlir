@@ -1,5 +1,9 @@
 // RUN: circt-opt -om-elaborate-object='target-class=Top' %s | FileCheck %s --check-prefix=TOP
 // RUN: circt-opt -om-elaborate-object='target-class=UseExtern' %s | FileCheck %s --check-prefix=STRICT-EXTERN
+// RUN: circt-opt -om-elaborate-object='target-class=ContainsTests' %s | FileCheck %s --check-prefix=CONTAINS
+// RUN: circt-opt -om-elaborate-object='target-class=ContainsUnknown' %s | FileCheck %s --check-prefix=CONTAINS-UNKNOWN
+// RUN: circt-opt -om-elaborate-object='target-class=ContainsUnknownMembers' %s | FileCheck %s --check-prefix=CONTAINS-UNKNOWN-MEMBERS
+// RUN: circt-opt -om-elaborate-object='target-class=ContainsParameterTop' %s | FileCheck %s --check-prefix=PARAM
 // RUN: circt-opt -om-elaborate-object='all-public-classes=true allow-unevaluated=true' %s | FileCheck %s --check-prefixes=CHECK,PUBLIC
 
 // CHECK-LABEL: om.class @StringOps() -> (str: !om.string, concat: !om.string) {
@@ -25,6 +29,114 @@ om.class @SimpleList() -> (result: !om.list<!om.integer>) {
   %c2 = om.constant #om.integer<2 : si8> : !om.integer
   %list = om.list_create %c1, %c2 : !om.integer
   om.class.fields %list : !om.list<!om.integer>
+}
+
+// Test direct list membership folding across list construction, concatenation,
+// and constant list attributes.
+// CONTAINS-LABEL: om.class @ContainsTests
+// CONTAINS-DAG: %[[TRUE:.+]] = om.constant true
+// CONTAINS-DAG: %[[FALSE:.+]] = om.constant false
+// CONTAINS: om.class.fields %[[TRUE]], %[[TRUE]], %[[FALSE]], %[[FALSE]],
+// CONTAINS-SAME: %[[TRUE]], %[[TRUE]], %[[TRUE]], %[[FALSE]],
+// CONTAINS-SAME: %[[TRUE]], %[[FALSE]], %[[TRUE]] : i1,
+om.class @ContainsTests(%identity: !om.string) -> (strStart: i1, strMiddle: i1, strAbsent: i1,
+                            emptyResult: i1, concatEnd: i1,
+                            constantResult: i1, intFound: i1, intAbsent: i1,
+                            boolFound: i1, boolAbsent: i1,
+                            identityResult: i1) {
+  %sA = om.constant "a" : !om.string
+  %sB = om.constant "b" : !om.string
+  %sAbsent = om.constant "absent" : !om.string
+  %strings = om.list_create %sA, %sB, %sB : !om.string
+  %strStart = om.list_contains %strings, %sA : !om.list<!om.string>
+  %strMiddle = om.list_contains %strings, %sB : !om.list<!om.string>
+  %strAbsent = om.list_contains %strings, %sAbsent : !om.list<!om.string>
+  %empty = om.list_create : !om.string
+  %emptyResult = om.list_contains %empty, %sA : !om.list<!om.string>
+  %head = om.list_create %sA : !om.string
+  %tail = om.list_create %sB : !om.string
+  %joined = om.list_concat %head, %tail : !om.list<!om.string>
+  %concatEnd = om.list_contains %joined, %sB : !om.list<!om.string>
+  %bigA = om.constant #om.integer<36755551979133953793 : si66> : !om.integer
+  %bigB = om.constant #om.integer<36755551979133953793 : si67> : !om.integer
+  %bigOther = om.constant #om.integer<36755551979133953794 : si67> : !om.integer
+  %integers = om.list_create %bigA : !om.integer
+  %intFound = om.list_contains %integers, %bigB : !om.list<!om.integer>
+  %listConstant = om.constant #om.list<!om.integer, [#om.integer<36755551979133953793 : si66>]> : !om.list<!om.integer>
+  %constantResult = om.list_contains %listConstant, %bigB : !om.list<!om.integer>
+  %intAbsent = om.list_contains %integers, %bigOther : !om.list<!om.integer>
+
+  %true = om.constant true
+  %false = om.constant false
+  %bools = om.list_create %true : i1
+  %boolFound = om.list_contains %bools, %true : !om.list<i1>
+  %boolAbsent = om.list_contains %bools, %false : !om.list<i1>
+  %identityList = om.list_create %identity : !om.string
+  %identityResult = om.list_contains %identityList, %identity :
+      !om.list<!om.string>
+  om.class.fields %strStart, %strMiddle, %strAbsent, %emptyResult, %concatEnd,
+      %constantResult, %intFound, %intAbsent, %boolFound, %boolAbsent,
+      %identityResult : i1, i1, i1, i1, i1, i1, i1, i1, i1, i1, i1
+}
+
+// Class arguments become constants through object inlining before the folder
+// retries membership.
+om.class @ContainsParameter(%values: !om.list<!om.integer>,
+                            %needle: !om.integer) -> (found: i1) {
+  %found = om.list_contains %values, %needle : !om.list<!om.integer>
+  om.class.fields %found : i1
+}
+
+// PARAM-LABEL: om.class @ContainsParameterTop() -> (found: i1)
+// PARAM: %[[PARAM_TRUE:.+]] = om.constant true
+// PARAM: om.class.fields %[[PARAM_TRUE]] : i1
+om.class @ContainsParameterTop() -> (found: i1) {
+  %one = om.constant #om.integer<1 : si8> : !om.integer
+  %two = om.constant #om.integer<2 : si8> : !om.integer
+  %values = om.list_create %one, %two : !om.integer
+  %child = om.object @ContainsParameter(%values, %two) :
+      (!om.list<!om.integer>, !om.integer) -> !om.class.type<@ContainsParameter>
+  %found = om.object.field %child["found"] :
+      (!om.class.type<@ContainsParameter>) -> i1
+  om.class.fields %found : i1
+}
+
+// Unknown inputs use the existing pure-op propagation policy.
+// CONTAINS-UNKNOWN-LABEL: om.class @ContainsUnknown()
+// CONTAINS-UNKNOWN: %[[UNKNOWN_ELEM:.+]] = om.unknown : i1
+// CONTAINS-UNKNOWN: %[[UNKNOWN_LIST:.+]] = om.unknown : i1
+// CONTAINS-UNKNOWN: om.class.fields %[[UNKNOWN_ELEM]], %[[UNKNOWN_LIST]] : i1, i1
+om.class @ContainsUnknown() -> (elementResult: i1, listResult: i1) {
+  %unknownElement = om.unknown : !om.string
+  %list = om.list_create : !om.string
+  %unknownElementResult = om.list_contains %list, %unknownElement :
+      !om.list<!om.string>
+  %unknownList = om.unknown : !om.list<!om.string>
+  %knownElement = om.constant "value" : !om.string
+  %unknownListResult = om.list_contains %unknownList, %knownElement :
+      !om.list<!om.string>
+  om.class.fields %unknownElementResult, %unknownListResult : i1, i1
+}
+
+// Elaboration must propagate unknown results for matching and nonmatching
+// list members. Skip the original input unknown before capturing results.
+// CONTAINS-UNKNOWN-MEMBERS-LABEL: om.class @ContainsUnknownMembers()
+// CONTAINS-UNKNOWN-MEMBERS: %[[INPUT:[0-9]+]] = om.unknown : i1
+// CONTAINS-UNKNOWN-MEMBERS-DAG: %[[A:[0-9]+]] = om.unknown : i1
+// CONTAINS-UNKNOWN-MEMBERS-DAG: %[[B:[0-9]+]] = om.unknown : i1
+// CONTAINS-UNKNOWN-MEMBERS-DAG: %[[C:[0-9]+]] = om.unknown : i1
+// CONTAINS-UNKNOWN-MEMBERS: om.class.fields %[[A]], %[[B]], %[[C]]
+// CONTAINS-UNKNOWN-MEMBERS-SAME: : i1, i1, i1{{ *$}}
+om.class @ContainsUnknownMembers() -> (foo: i1, bar: i1, baz: i1) {
+  %0 = om.unknown : i1
+  %1 = om.constant false
+  %2 = om.constant true
+  %3 = om.list_create %0, %1 : i1
+  %4 = om.list_contains %3, %1 : !om.list<i1>
+  %5 = om.list_contains %3, %2 : !om.list<i1>
+  %6 = om.list_create %1, %0 : i1
+  %7 = om.list_contains %6, %1 : !om.list<i1>
+  om.class.fields %4, %5, %7 : i1, i1, i1
 }
 
 // Test integer operations (add, mul, shr, shl)

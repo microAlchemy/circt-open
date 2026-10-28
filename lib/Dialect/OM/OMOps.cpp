@@ -1124,6 +1124,62 @@ OpFoldResult PropEqOp::fold(FoldAdaptor adaptor) {
 }
 
 //===----------------------------------------------------------------------===//
+// ListContainsOp
+//===----------------------------------------------------------------------===//
+
+namespace {
+/// Fold membership based on SSA identity for a directly constructed list.
+struct FoldListContainsIdentity : OpRewritePattern<ListContainsOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ListContainsOp op,
+                                PatternRewriter &rewriter) const override {
+    auto listCreate = op.getList().getDefiningOp<ListCreateOp>();
+    if (!listCreate || op.getElement().getDefiningOp<UnknownValueOp>())
+      return failure();
+
+    bool found = false;
+    for (Value input : listCreate.getInputs()) {
+      // Preserve explicit unknown behavior even if another input matches.
+      if (input.getDefiningOp<UnknownValueOp>())
+        return failure();
+      found |= input == op.getElement();
+    }
+    if (!found)
+      return failure();
+
+    rewriter.replaceOpWithNewOp<ConstantOp>(
+        op, mlir::IntegerAttr::get(rewriter.getI1Type(), 1));
+    return success();
+  }
+};
+} // namespace
+
+void ListContainsOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                                 MLIRContext *context) {
+  results.add<FoldListContainsIdentity>(context);
+}
+
+OpFoldResult ListContainsOp::fold(FoldAdaptor adaptor) {
+  auto listAttr = dyn_cast_or_null<ListAttr>(adaptor.getList());
+  Attribute elementAttr = adaptor.getElement();
+  // Even an empty list requires a constant needle: an explicitly unknown
+  // needle must remain unknown rather than being folded to false.
+  if (!listAttr || !elementAttr)
+    return {};
+
+  bool found = false;
+  for (Attribute candidate : listAttr.getElements()) {
+    auto equality = evaluateBinaryEquality(candidate, elementAttr);
+    if (failed(equality))
+      return {};
+    found |= !cast<mlir::IntegerAttr>(*equality).getValue().isZero();
+  }
+
+  return mlir::IntegerAttr::get(getResult().getType(), found);
+}
+
+//===----------------------------------------------------------------------===//
 // IntegerAndOp / IntegerOrOp / IntegerXorOp
 //===----------------------------------------------------------------------===//
 

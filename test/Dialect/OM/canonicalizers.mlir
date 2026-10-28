@@ -324,3 +324,91 @@ om.class @ListConcatFold(
       !om.list<!om.string>, !om.list<!om.string>, !om.list<!om.string>,
       !om.list<!om.string>, !om.list<!om.string>, !om.list<!om.string>
 }
+
+// Explicit unknown inputs keep list membership from folding.
+// CHECK-LABEL: @ListContainsUnknownFold
+// CHECK: [[R0:%.+]] = om.list_contains {{.*}} : <i1>{{ *$}}
+// CHECK: [[R1:%.+]] = om.list_contains {{.*}} : <i1>{{ *$}}
+// CHECK: [[R2:%.+]] = om.list_contains {{.*}} : <i1>{{ *$}}
+// CHECK: [[R3:%.+]] = om.list_contains {{.*}} : <i1>{{ *$}}
+// CHECK: om.class.fields [[R0]], [[R1]], [[R2]], [[R3]]
+// CHECK-SAME: : i1, i1, i1, i1{{ *$}}
+om.class @ListContainsUnknownFold() -> (foo: i1, bar: i1,
+                                     baz: i1, qux: i1) {
+  %0 = om.unknown : i1
+  %1 = om.constant false
+  %2 = om.constant true
+
+  // Unknown member precedes a matching element.
+  %3 = om.list_create %0, %1 : i1
+  %4 = om.list_contains %3, %1 : !om.list<i1>
+  %5 = om.list_contains %3, %2 : !om.list<i1>
+
+  // A known match precedes the unknown member.
+  %6 = om.list_create %1, %0 : i1
+  %7 = om.list_contains %6, %1 : !om.list<i1>
+
+  // An unknown sublist follows a known match in a concatenation.
+  %8 = om.unknown : !om.list<i1>
+  %9 = om.list_create : i1
+  %10 = om.list_concat %8, %9 : !om.list<i1>
+  %11 = om.list_create %1 : i1
+  %12 = om.list_concat %10, %11 : !om.list<i1>
+  %13 = om.list_contains %12, %1 : !om.list<i1>
+
+  om.class.fields %4, %5, %7, %13 : i1, i1, i1, i1
+}
+
+// ListContains folds attributes only; its local canonicalization pattern
+// handles SSA identity for directly constructed lists without crossing unknowns.
+// CHECK-LABEL: func.func @ListContainsAttributeAndIdentityFolders
+// CHECK-DAG: [[TRUE:%.+]] = om.constant true
+// CHECK-DAG: [[FALSE:%.+]] = om.constant false
+// CHECK-DAG: [[STR_A:%.+]] = om.constant "a" : !om.string
+// CHECK-DAG: [[CONTAINS_EMPTY:%.+]] = om.constant #om.list<!om.string, []> : !om.list<!om.string>
+// CHECK: [[EMPTY_NEEDLE:%.+]] = om.list_contains [[CONTAINS_EMPTY]], %arg0 : <!om.string>{{$}}
+// CHECK: [[UNKNOWN:%.+]] = om.unknown : !om.string
+// CHECK: [[UNKNOWN_INPUT:%.+]] = om.list_contains [[UNKNOWN_MEMBER_LIST:%.+]], [[STR_A]] : <!om.string>{{$}}
+// CHECK: [[UNKNOWN_NEEDLE:%.+]] = om.list_contains [[UNKNOWN_NEEDLE_LIST:%.+]], [[UNKNOWN]] : <!om.string>{{$}}
+// CHECK: return [[TRUE]], [[FALSE]], [[TRUE]], [[FALSE]], [[TRUE]], [[FALSE]], [[EMPTY_NEEDLE]], [[TRUE]], [[TRUE]], [[UNKNOWN_INPUT]], [[UNKNOWN_NEEDLE]]
+func.func @ListContainsAttributeAndIdentityFolders(
+    %needle: !om.string, %other: !om.string) ->
+    (i1, i1, i1, i1, i1, i1, i1, i1, i1, i1, i1) {
+  %strA = om.constant "a" : !om.string
+  %strB = om.constant "b" : !om.string
+  %strAbsent = om.constant "absent" : !om.string
+  %strings = om.list_create %strA, %strB : !om.string
+  %stringFound = om.list_contains %strings, %strB : !om.list<!om.string>
+  %stringAbsent = om.list_contains %strings, %strAbsent : !om.list<!om.string>
+
+  %trueValue = om.constant true
+  %falseValue = om.constant false
+  %booleans = om.list_create %trueValue : i1
+  %boolFound = om.list_contains %booleans, %trueValue : !om.list<i1>
+  %boolAbsent = om.list_contains %booleans, %falseValue : !om.list<i1>
+
+  %negative = om.constant #om.integer<-36755551979133953793 : si66> : !om.integer
+  %negativeWide = om.constant #om.integer<-36755551979133953793 : si67> : !om.integer
+  %negativeAbsent = om.constant #om.integer<-36755551979133953794 : si67> : !om.integer
+  %integers = om.list_create %negative : !om.integer
+  %integerFound = om.list_contains %integers, %negativeWide : !om.list<!om.integer>
+  %integerAbsent = om.list_contains %integers, %negativeAbsent : !om.list<!om.integer>
+
+  %empty = om.list_create : !om.string
+  %emptyNonconstantNeedle = om.list_contains %empty, %needle : !om.list<!om.string>
+  %identityList = om.list_create %needle : !om.string
+  %identity = om.list_contains %identityList, %needle : !om.list<!om.string>
+  %identityMultiList = om.list_create %other, %needle : !om.string
+  %identityMulti = om.list_contains %identityMultiList, %needle : !om.list<!om.string>
+
+  %unknown = om.unknown : !om.string
+  %unknownMemberList = om.list_create %strA, %unknown : !om.string
+  %unknownInput = om.list_contains %unknownMemberList, %strA : !om.list<!om.string>
+  %unknownNeedleList = om.list_create %unknown : !om.string
+  %unknownNeedle = om.list_contains %unknownNeedleList, %unknown : !om.list<!om.string>
+
+  return %stringFound, %stringAbsent, %boolFound, %boolAbsent, %integerFound,
+      %integerAbsent, %emptyNonconstantNeedle, %identity, %identityMulti,
+      %unknownInput, %unknownNeedle : i1, i1, i1, i1, i1, i1, i1, i1, i1,
+      i1, i1
+}

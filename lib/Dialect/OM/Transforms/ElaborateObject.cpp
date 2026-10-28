@@ -282,6 +282,7 @@ struct ElaborateObjectPass
                                           !allowUnevaluated);
     patterns.add<EvaluateObjectField>(classOp.getContext(), symTable,
                                       fieldIndexes);
+    ListContainsOp::getCanonicalizationPatterns(patterns, classOp.getContext());
     patterns.add<UnknownPropagationPattern>(classOp.getContext());
     GreedyRewriteConfig config;
     // Disable iteration limit to allow full recursive inlining.
