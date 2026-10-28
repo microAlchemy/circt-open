@@ -21,6 +21,7 @@
 #include "llvm/Support/Debug.h"
 #include "gtest/gtest.h"
 #include <mlir/IR/BuiltinAttributes.h>
+#include <optional>
 
 using namespace mlir;
 using namespace circt::om;
@@ -934,6 +935,105 @@ om.class @IntegerBinaryArithmeticWidthMismatch() -> (result: !om.integer) {
 
   ASSERT_TRUE(succeeded(result));
   ASSERT_EQ(3, getInteger(getField(result.value(), "result")));
+}
+
+TEST_F(EvaluatorTests, ListContainsParameters) {
+  StringRef mod = R"MLIR(
+om.class @ContainsString(%foo: !om.list<!om.string>, %bar: !om.string) -> (result: i1) {
+  %result = om.list_contains %foo, %bar : !om.list<!om.string>
+  om.class.fields %result : i1
+}
+om.class @ContainsStringConcat(%foo: !om.list<!om.string>, %bar: !om.list<!om.string>, %baz: !om.string) -> (result: i1) {
+  %joined = om.list_concat %foo, %bar : !om.list<!om.string>
+  %result = om.list_contains %joined, %baz : !om.list<!om.string>
+  om.class.fields %result : i1
+}
+om.class @ContainsInteger(%foo: !om.list<!om.integer>, %bar: !om.integer) -> (result: i1) {
+  %result = om.list_contains %foo, %bar : !om.list<!om.integer>
+  om.class.fields %result : i1
+}
+om.class @ContainsBool(%foo: !om.list<i1>, %bar: i1) -> (result: i1) {
+  %result = om.list_contains %foo, %bar : !om.list<i1>
+  om.class.fields %result : i1
+}
+)MLIR";
+
+  OwningOpRef<ModuleOp> owning = parseModule(mod);
+  ASSERT_TRUE(owning);
+  Evaluator evaluator(owning.get());
+
+  auto makeString = [&](StringRef value) {
+    return evaluator::AttributeValue::get(
+        StringAttr::get(value, StringType::get(&context)));
+  };
+  auto makeBool = [&](bool value) {
+    return evaluator::AttributeValue::get(BoolAttr::get(&context, value));
+  };
+  auto makeList = [&](Type elementType,
+                      SmallVector<evaluator::EvaluatorValuePtr> elements) {
+    return std::make_shared<evaluator::ListValue>(ListType::get(elementType),
+                                                  std::move(elements),
+                                                  UnknownLoc::get(&context));
+  };
+  auto stringType = StringType::get(&context);
+  auto boolType = mlir::IntegerType::get(&context, 1);
+  auto runContains = [&](StringRef caseName, StringRef className,
+                         SmallVector<evaluator::EvaluatorValuePtr> params,
+                         std::optional<bool> expected) {
+    SCOPED_TRACE(caseName.str());
+    auto result =
+        evaluator.instantiate(StringAttr::get(&context, className), params);
+    ASSERT_TRUE(succeeded(result));
+    auto value = getField(result.value(), "result");
+    auto *attribute = dyn_cast<evaluator::AttributeValue>(value.get());
+    ASSERT_TRUE(attribute);
+    ASSERT_EQ(attribute->getType(), boolType);
+    ASSERT_EQ(attribute->isUnknown(), !expected.has_value());
+    if (expected.has_value())
+      EXPECT_EQ(attribute->getAs<BoolAttr>(),
+                BoolAttr::get(&context, *expected));
+  };
+
+  SmallVector<evaluator::EvaluatorValuePtr> knownStrings = {makeString("foo"),
+                                                            makeString("bar")};
+  runContains("string hit", "ContainsString",
+              {makeList(stringType, knownStrings), makeString("foo")}, true);
+  runContains("string miss", "ContainsString",
+              {makeList(stringType, knownStrings), makeString("baz")}, false);
+  runContains("empty string list", "ContainsString",
+              {makeList(stringType, {}), makeString("foo")}, false);
+  runContains("string concatenation across imported lists",
+              "ContainsStringConcat",
+              {makeList(stringType, {makeString("foo")}),
+               makeList(stringType, {makeString("bar")}), makeString("bar")},
+              true);
+
+  auto integerType = OMIntegerType::get(&context);
+  runContains("integer match", "ContainsInteger",
+              {makeList(integerType, {makeIntegerValue(&context, 17),
+                                      makeIntegerValue(&context, 42)}),
+               makeIntegerValue(&context, 42)},
+              true);
+  runContains("boolean miss", "ContainsBool",
+              {makeList(boolType, {makeBool(false)}), makeBool(true)}, false);
+
+  auto unknownFoo = evaluator::AttributeValue::get(stringType);
+  unknownFoo->markUnknown();
+  runContains("unknown member in known list", "ContainsString",
+              {makeList(stringType, {unknownFoo, makeString("bar")}),
+               makeString("foo")},
+              std::nullopt);
+  runContains("known match before unknown member", "ContainsString",
+              {makeList(stringType, {makeString("bar"), unknownFoo}),
+               makeString("bar")},
+              std::nullopt);
+  runContains("unknown search scalar", "ContainsString",
+              {makeList(stringType, knownStrings), unknownFoo}, std::nullopt);
+
+  auto unknownList = makeList(stringType, knownStrings);
+  unknownList->markUnknown();
+  runContains("unknown list with known contents", "ContainsString",
+              {unknownList, makeString("foo")}, std::nullopt);
 }
 
 TEST_F(EvaluatorTests, ListConcat) {
