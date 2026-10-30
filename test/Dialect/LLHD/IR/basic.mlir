@@ -88,7 +88,11 @@ hw.module @checkPrb(
   in %arg0 : !llhd.ref<i1>,
   in %arg1 : !llhd.ref<i64>,
   in %arg2 : !llhd.ref<!hw.array<3xi8>>,
-  in %arg3 : !llhd.ref<!hw.struct<foo: i1, bar: i2, baz: i4>>
+  in %arg3 : !llhd.ref<!hw.struct<foo: i1, bar: i2, baz: i4>>,
+  in %arg0 : !llhd.net<i1>,
+  in %arg1 : !llhd.net<i64>,
+  in %arg2 : !llhd.net<!hw.array<3xi8>>,
+  in %arg3 : !llhd.net<!hw.struct<foo: i1, bar: i2, baz: i4>>
 ) {
   // CHECK: %{{.*}} = llhd.prb %arg0 : i1
   %0 = llhd.prb %arg0 : i1
@@ -98,6 +102,14 @@ hw.module @checkPrb(
   %2 = llhd.prb %arg2 : !hw.array<3xi8>
   // CHECK-NEXT: %{{.*}} = llhd.prb %arg3 : !hw.struct<foo: i1, bar: i2, baz: i4>
   %3 = llhd.prb %arg3 : !hw.struct<foo: i1, bar: i2, baz: i4>
+  // CHECK: %{{.*}} = llhd.prb_net %arg0 : i1
+  %4 = llhd.prb_net %arg0 : i1
+  // CHECK-NEXT: %{{.*}} = llhd.prb_net %arg1 : i64
+  %5 = llhd.prb_net %arg1 : i64
+  // CHECK-NEXT: %{{.*}} = llhd.prb_net %arg2 : !hw.array<3xi8>
+  %6 = llhd.prb_net %arg2 : !hw.array<3xi8>
+  // CHECK-NEXT: %{{.*}} = llhd.prb_net %arg3 : !hw.struct<foo: i1, bar: i2, baz: i4>
+  %7 = llhd.prb_net %arg3 : !hw.struct<foo: i1, bar: i2, baz: i4>
 }
 
 // CHECK-LABEL: @checkOutput
