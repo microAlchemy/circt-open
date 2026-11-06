@@ -14,6 +14,7 @@ from typing import Dict, List
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge
+from cocotb.handle import HierarchyObject
 
 NUM_ITEMS = 200
 MAX_CYCLES = 20 * NUM_ITEMS
@@ -105,7 +106,7 @@ async def fifo_source(dut, prefix: str, values: List[int], push_prob: float):
   push.value = 0
 
 
-async def delayed_source(dut, prefix: str, delay: int, values: List[int],
+async def delayed_source(dut: cocotb.handle.HierarchyObject, prefix: str, delay: int, values: List[int],
                          valid_prob: float, has_ready: bool):
   """Drive a ValidReady(delay) or ValidOnly(delay) channel. The data for a
   transfer is driven `delay` cycles after the handshake. Junk otherwise."""
