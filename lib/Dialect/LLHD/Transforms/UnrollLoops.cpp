@@ -17,6 +17,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/FoldUtils.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/Support/Debug.h"
 
@@ -616,9 +617,22 @@ void UnrollLoopsPass::runOnOperation() {
 void UnrollLoopsPass::runOnOperation(CombinationalOp op) {
   // Unrolling a loop may open up opportunities to unroll its nested loops.
   // Iterate until all possible loops are unrolled or the limit is reached.
-  for (unsigned i = 0; i < 16; ++i)
+  for (unsigned i = 0; i < 16; ++i) {
     if (!unrollLoops(op))
-      break;
+      return;
+    // Unrolling replaced the induction variables of the unrolled loops with
+    // constants. A nested loop whose bounds were computed from such a variable
+    // now starts at an expression like 0 + 1, which matchExit only accepts
+    // AFTER fold.
+    OperationFolder folder(op.getContext());
+    op.getBody().walk(
+        [&](Operation *nested) { (void)folder.tryToFold(nested); });
+  }
+
+  LLVM_DEBUG(llvm::dbgs()
+             << "LLHD loop unrolling reached the 16-round limit in "
+             << op.getLoc() << "; additional loops may be unrollable\n");
+
 }
 
 bool UnrollLoopsPass::unrollLoops(CombinationalOp op) {
@@ -679,10 +693,12 @@ bool UnrollLoopsPass::unrollLoops(CombinationalOp op) {
       continue;
     }
 
-    // If an enclosing loop is unrolled, we retry the unrolling.
-    retry |= llvm::any_of(loops, [&](const Loop &other) {
-      return other.cfgLoop.contains(cfgLoop);
-    });
+    // Unrolling the loops that did match can make this one matchable on the
+    // next round: copies of an unrolled enclosing loop can give it constant
+    // bounds, and an unrolled loop that runs before it can hand it a constant
+    // start. Retry whenever a round both unrolls and rejects loops. A round
+    // that unrolls nothing returns early below, so this always terminates.
+    retry = true;
   }
 
   if (loops.empty())
