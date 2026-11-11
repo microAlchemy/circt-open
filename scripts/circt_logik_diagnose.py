@@ -32,7 +32,7 @@ DESIGN_OVERRIDES = {
         'axi_crossbar.v', 'axi_crossbar_wr.v', 'axi_register_rd.v',
         'axi_register_wr.v', 'priority_encoder.v'), {}, ()),
     'blackparrot': ('black_parrot', ('pickled.v', 'lambda.v'), {}, ('SYNTHESIS',)),
-    'coralnpu': (None, (), {}, ('SYNTHESIS',)),
+    'coralnpu': ('__resolve_from_compile_json__', (), {}, ('SYNTHESIS',)),
     'qr': ('qr', ('qr_cordic.v', 'qr_boundary.v', 'qr_internal.v',
                  'qr_array.v', 'qr.v'), {'N': '16', 'DW': '16'}, ()),
     'rocket': ('rocket', ('rocket.v', 'riscv_bootrom.v'), {}, ()),
@@ -48,7 +48,7 @@ EXPORT = ('--lower-hw-to-sv', '--hw-legalize-modules', '--hw-cleanup',
 OP_RE = re.compile(r'(?<![\w.])(llhd|cf|seq|sim|moore|hw|comb|sv|ub|datapath)\.([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)')
 MLIR_IGNORED_RE = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"')
 SEVERITY_RE = re.compile(r'^(?:[^\s:]+(?::\d+){0,2}:\s+)?(?P<kind>fatal error|error|warning|remark):\s*(?P<msg>.*)$')
-CRASH_RE = re.compile(r'LLVM ERROR:|PLEASE submit a bug report|Stack dump:|Assertion `|UNREACHABLE executed')
+CRASH_RE = re.compile(r'ERROR:|PLEASE submit a bug report|Stack dump:|Assertion `|UNREACHABLE executed')
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 LOCATION_RE = re.compile(r'(?:^|\s)(?P<file>[^\s:]+):(?P<line>\d+):(?P<col>\d+):\s*(?:fatal error|error|warning|remark):')
 
@@ -90,6 +90,7 @@ def resolve_coral_top(root: Path) -> str:
     explicit = os.environ.get('CORAL_TOP', '').strip()
     if explicit:
         return explicit
+
     meta_path = root / 'compile.json'
     if not meta_path.is_file():
         raise FileNotFoundError(
