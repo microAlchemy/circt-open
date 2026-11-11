@@ -6,7 +6,6 @@ from tabulate import tabulate
 import argparse
 import json
 import importlib.util
-import shlex
 import os
 import re
 import shutil
@@ -46,10 +45,10 @@ BASE_OPT = ('--hw-cleanup', '--canonicalize', '--cse', '--canonicalize')
 LOWER = ('--lower-seq-to-sv', '--lower-sim-to-sv', '--canonicalize')
 EXPORT = ('--lower-hw-to-sv', '--hw-legalize-modules', '--hw-cleanup',
           '--export-verilog', '-o', '/dev/null')
-OP_RE = re.compile(r'(?<![\w.])(llhd|cf|seq|sim|moore|hw|comb|sv|ub|datapath)\.([A-Za-z_]\w*)')
+OP_RE = re.compile(r'(?<![\w.])(llhd|cf|seq|sim|moore|hw|comb|sv|ub|datapath)\.([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)')
 MLIR_IGNORED_RE = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"')
-SEVERITY_RE = re.compile(r'\b(?P<kind>fatal error|error|warning|remark):\s*(?P<msg>.*)$')
-NOTE_RE = re.compile(r'\bnote:\s*')
+SEVERITY_RE = re.compile(r'^(?:[^\s:]+(?::\d+){0,2}:\s+)?(?P<kind>fatal error|error|warning|remark):\s*(?P<msg>.*)$')
+CRASH_RE = re.compile(r'LLVM ERROR:|PLEASE submit a bug report|Stack dump:|Assertion `|UNREACHABLE executed')
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 LOCATION_RE = re.compile(r'(?:^|\s)(?P<file>[^\s:]+):(?P<line>\d+):(?P<col>\d+):\s*(?:fatal error|error|warning|remark):')
 
@@ -83,55 +82,29 @@ def discover_designs() -> dict[str, Path]:
         if rtl.is_dir() and (any(rtl.glob('*.v')) or any(rtl.glob('*.sv'))):
             benchmark = rtl.parent
             found[benchmark.relative_to(root).as_posix()] = benchmark
-
-    return found
+    canonical = {(CORAL_BENCH if n == 'coralnpu' else BENCH / n).resolve() for n in DESIGN_OVERRIDES}
+    return {k: p for k, p in found.items() if p.resolve() not in canonical}
 
 def resolve_coral_top(root: Path) -> str:
-    """Use CORAL_TOP if supplied; otherwise infer the top from compile.json."""
+    """Use CORAL_TOP if supplied; otherwise read compile.json."""
     explicit = os.environ.get('CORAL_TOP', '').strip()
     if explicit:
         return explicit
     meta_path = root / 'compile.json'
     if not meta_path.is_file():
-        raise FileNotFoundError(f'Missing {meta_path}; set CORAL_TOP explicitly')
+        raise FileNotFoundError(
+            f'Missing {meta_path}; set CORAL_TOP explicitly'
+        )
+
     data = json.loads(meta_path.read_text())
-    top_keys = {'top', 'top_module', 'topmodule', 'top_module_name',
-                'topmodulename', 'topmodules', 'tops', 'top_modules'}
-    candidates: set[str] = set()
+    top = data.get('top')
 
-    def walk(value: object) -> None:
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if key.lower().replace('-', '_') in top_keys:
-                    vals = item if isinstance(item, list) else [item]
-                    for v in vals:
-                        if isinstance(v, str) and re.fullmatch(r'[A-Za-z_$][A-Za-z0-9_$]*', v):
-                            candidates.add(v)
-                if key in ('command', 'arguments'):
-                    if isinstance(item, str):
-                        try:
-                            args = shlex.split(item)
-                        except ValueError:
-                            args = []
-                    elif isinstance(item, list):
-                        args = item
-                    else:
-                        args = []
-                    for i, arg in enumerate(args[:-1]):
-                        if arg in ('-top', '--top', '-top-module', '--top-module'):
-                            candidates.add(str(args[i + 1]))
-                walk(item)
-        elif isinstance(value, list):
-            for v in value:
-                walk(v)
+    if not isinstance(top, str) or not top.strip():
+        raise ValueError(
+            f'Missing or invalid top in {meta_path}; set CORAL_TOP explicitly'
+        )
 
-    walk(data)
-    if len(candidates) == 1:
-        return next(iter(candidates))
-    raise ValueError(
-        f'Could not identify one unambiguous top from {meta_path}; '
-        f'candidates={sorted(candidates)}. Set CORAL_TOP to the actual benchmark top.')
-
+    return top
 
 def manifest(name: str, libs: list[str] | None, discovered: dict[str, Path],
              top_override: str | None = None) -> dict:
@@ -269,11 +242,24 @@ def parse_diagnostics(path: Path) -> list[dict]:
         return []
     events: list[dict] = []
     active: dict | None = None
+    in_crash = False
     with path.open(errors='replace') as f:
         for lineno, raw in enumerate(f, 1):
             line = ANSI_RE.sub('', raw.rstrip('\n'))
+            if CRASH_RE.search(line):
+                if not in_crash:
+                    if active is not None:
+                        events.append(active)
+                    active = {'kind': 'fatal error', 'message': line.strip(),
+                              'header': line, 'stderr_line': lineno,
+                              'location': None, 'text': line + '\n'}
+                    in_crash = True
+                else:
+                    active['text'] += line + '\n'
+                continue
             m = SEVERITY_RE.search(line)
-            if m is not None and NOTE_RE.search(line) is None:
+            if m is not None:
+                in_crash = False
                 if active is not None:
                     events.append(active)
                 loc = LOCATION_RE.search(line)
@@ -319,6 +305,7 @@ def attach(result: dict, label: str, step: dict,
 def analyze(name: str, mode: str, spec: dict, out: Path, tools: Path,
             timeout: float, reimport: bool) -> dict:
     folder = out / name / mode
+    shutil.rmtree(folder, ignore_errors=True)
     folder.mkdir(parents=True, exist_ok=True)
     save_json(folder / 'manifest.json', spec)
     result = {'design': name, 'mode': mode, 'top': spec['top'], 'steps': {}}
@@ -326,9 +313,6 @@ def analyze(name: str, mode: str, spec: dict, out: Path, tools: Path,
     opt_ir = folder / 'optimized.mlir'
     low_ir = folder / 'lowered.mlir'
     sv = folder / (spec['top'] + '.sv')
-    for old in (imp_ir, opt_ir, low_ir, sv, folder / 'import_moore.mlir',
-                folder / 'reimported_moore.mlir'):
-        old.unlink(missing_ok=True)
     cmd = frontend_command(tools, spec, mode, imp_ir)
     cwd = Path(spec['cwd']) if spec.get('cwd') else None
     imported = attach(result, 'import', run_step(cmd, folder, 'import', timeout, cwd=cwd), imp_ir)
@@ -457,13 +441,17 @@ def write_report(results: list[dict], setup_errors: dict[str, str],
             if step is None or step['status'] != 'ok':
                 continue
             ops = step['ops']
+            pre = r['steps']['optimize']['ops']
             sim = sum(num for name, num in ops.items() if name.startswith('sim.'))
+            pre_sim = sum(num for name, num in pre.items() if name.startswith('sim.'))
             cf = sum(num for name, num in ops.items() if name.startswith('cf.'))
             rows.append([r['design'], r['mode'], ops.get('llhd.process', 0),
                          ops.get('llhd.sig', 0), ops.get('llhd.drv', 0),
-                         cf, sim, ops.get('seq.firreg', 0)])
+                         cf, f'{pre_sim} → {sim}',
+                         f"{pre.get('seq.firreg', 0)} → {ops.get('seq.firreg', 0)}"])
         w.write(tabulate(rows, headers=['Design', 'Mode', 'llhd.process', 'llhd.sig',
-                                        'llhd.drv', 'CF branches', 'sim.*', 'seq.firreg'],
+                                        'llhd.drv', 'CF branches', 'sim.* (opt → lowered)',
+                                        'seq.firreg (opt → lowered)'],
                          tablefmt='github'))
         w.write('\nCounts are text occurrences, not independently verified operation counts. '
                 'A remaining operation is not automatically an error or nonsynthesizable. '
