@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Inventory CIRCT import, lowering, and Verilog-emission failures on LogikBench."""
 from __future__ import annotations
-
+from dotenv import load_dotenv
+from tabulate import tabulate
 import argparse
 import json
+import importlib.util
+import shlex
 import os
 import re
 import shutil
@@ -15,12 +18,12 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-HOME = Path.home()
-CIRCT = HOME / 'projwect/CC/circt'
-LB = HOME / 'projwect/CC/logikbench'
+load_dotenv()
+CIRCT = Path(os.environ.get('CIRCT_ROOT', '.')).expanduser().resolve()
+LB = Path(os.environ.get('LOGIKBENCH_ROOT', '.')).expanduser().resolve()
 BENCH = LB / 'logikbench/benchmarks/large'
 CORAL_BENCH = LB / 'logikbench/benchmarks/microalchemy/coralnpu'
-DEFAULT_OUT = CIRCT / 'cleanedlogik/diagnostics'
+DEFAULT_OUT = Path(os.environ.get('DIAGNOSTICS_OUT', 'diagnostics')).expanduser()
 DEFAULT_DEFINES = ('SYNTHESIS', 'VERILINT', 'NO_PLI_OR_EMU', 'DESIGNWARE_NOEXIST')
 
 
@@ -44,6 +47,7 @@ LOWER = ('--lower-seq-to-sv', '--lower-sim-to-sv', '--canonicalize')
 EXPORT = ('--lower-hw-to-sv', '--hw-legalize-modules', '--hw-cleanup',
           '--export-verilog', '-o', '/dev/null')
 OP_RE = re.compile(r'(?<![\w.])(llhd|cf|seq|sim|moore|hw|comb|sv|ub|datapath)\.([A-Za-z_]\w*)')
+MLIR_IGNORED_RE = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"')
 SEVERITY_RE = re.compile(r'\b(?P<kind>fatal error|error|warning|remark):\s*(?P<msg>.*)$')
 NOTE_RE = re.compile(r'\bnote:\s*')
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
@@ -62,13 +66,25 @@ def save_json(p: Path, obj: object) -> None:
 
 
 def library_dirs() -> list[str]:
-    python = LB / 'banana/bin/python'
-    cmd = [str(python), '-c',
-           'import lambdalib; from pathlib import Path; '
-           'print(Path(lambdalib.__file__).resolve().parent)']
-    root = Path(subprocess.check_output(cmd, text=True, stderr=subprocess.PIPE).strip())
+    spec = importlib.util.find_spec('lambdalib')
+    if spec is None or not spec.submodule_search_locations:
+        raise ImportError('lambdalib is not importable; install it in this Python environment')
+    root = Path(next(iter(spec.submodule_search_locations))).resolve()
     return sorted(str(p.resolve()) for p in root.rglob('rtl') if p.is_dir())
 
+
+def discover_designs() -> dict[str, Path]:
+    root = LB / 'logikbench/benchmarks'
+    found: dict[str, Path] = {}
+
+    if not root.is_dir():
+        return found
+    for rtl in sorted(root.rglob('rtl')):
+        if rtl.is_dir() and (any(rtl.glob('*.v')) or any(rtl.glob('*.sv'))):
+            benchmark = rtl.parent
+            found[benchmark.relative_to(root).as_posix()] = benchmark
+
+    return found
 
 def resolve_coral_top(root: Path) -> str:
     """Use CORAL_TOP if supplied; otherwise infer the top from compile.json."""
@@ -92,7 +108,6 @@ def resolve_coral_top(root: Path) -> str:
                         if isinstance(v, str) and re.fullmatch(r'[A-Za-z_$][A-Za-z0-9_$]*', v):
                             candidates.add(v)
                 if key in ('command', 'arguments'):
-                    import shlex
                     if isinstance(item, str):
                         try:
                             args = shlex.split(item)
@@ -118,14 +133,17 @@ def resolve_coral_top(root: Path) -> str:
         f'candidates={sorted(candidates)}. Set CORAL_TOP to the actual benchmark top.')
 
 
-def manifest(name: str, libs: list[str] | None) -> dict:
-    top, filenames, parameters, defines = DESIGNS[name]
+def manifest(name: str, libs: list[str] | None, discovered: dict[str, Path],
+             top_override: str | None = None) -> dict:
+    top, filenames, parameters, defines = DESIGNS.get(name, (None, (), {}, ()))
+    if top_override:
+        top = top_override
     if name == 'coralnpu':
         root = CORAL_BENCH.resolve()
         filelist = root / 'filelist.f'
         if not filelist.is_file():
             raise FileNotFoundError(f'Missing CoralNPU filelist: {filelist}')
-        top = resolve_coral_top(root)
+        top = top_override or resolve_coral_top(root)
         return {
             'top': top,
             'files': [],
@@ -137,7 +155,15 @@ def manifest(name: str, libs: list[str] | None) -> dict:
             'parameters': dict(parameters),
         }
 
-    root = BENCH / name
+    root = discovered.get(name, BENCH / name)
+    if name not in DESIGNS:
+        if not top:
+            raise ValueError(f'Unknown top for {name!r}; supply --top MODULE')
+        filenames = tuple(str(p.relative_to(root / 'rtl')) for p in
+                          sorted((root / 'rtl').rglob('*'))
+                          if p.is_file() and p.suffix.lower() in ('.v', '.sv'))
+        if not filenames:
+            raise FileNotFoundError(f'No RTL sources found under {root / "rtl"}')
     spec = {
         'top': top,
         'files': [str((root / 'rtl' / f).resolve()) for f in filenames],
@@ -230,10 +256,10 @@ def run_step(command: list[str], folder: Path, label: str,
 def operation_counts(path: Path) -> dict[str, int]:
     counts: Counter[str] = Counter()
     if path.is_file():
-        with path.open(errors='replace') as f:
-            for line in f:
-                for m in OP_RE.finditer(line):
-                    counts[m.group(1) + '.' + m.group(2)] += 1
+        text = path.read_text(errors='replace')
+        text = MLIR_IGNORED_RE.sub(lambda m: '\n' * m.group().count('\n'), text)
+        for m in OP_RE.finditer(text):
+            counts[m.group(1) + '.' + m.group(2)] += 1
     return dict(counts.most_common())
 
 
@@ -364,19 +390,19 @@ def write_report(results: list[dict], setup_errors: dict[str, str],
                 'There is no predefined error taxonomy.\n\n')
         w.write('`--sroa` is experimental; successful export does not establish equivalence.\n\n')
         w.write('## Stage results\n\n')
-        w.write('| Design | Mode | Import | Optimize | Lower seq/sim | Export | '
-                + ('Reimport |' if reimport else '') + '\n')
-        w.write('|---|---|---|---|---|---|'
-                + ('---|' if reimport else '') + '\n')
         stages = ['import', 'optimize', 'lower_seq_sim', 'export']
         if reimport:
             stages.append('reimport')
-        for design, error in sorted(setup_errors.items()):
-            w.write(f'| {design} | setup failed | {md_escape(error)} | '
-                    + ' | '.join('skipped' for _ in stages[1:]) + ' |\n')
-        for r in results:
-            labels = [step_label(r['steps'].get(s)) for s in stages]
-            w.write('| ' + ' | '.join([r['design'], r['mode'], *labels]) + ' |\n')
+        headers = ['Design', 'Mode', 'Import', 'Optimize', 'Lower seq/sim', 'Export']
+        if reimport:
+            headers.append('Reimport')
+        rows = [[design, 'setup failed', md_escape(error),
+                 *(['skipped'] * (len(stages) - 1))]
+                for design, error in sorted(setup_errors.items())]
+        rows.extend([r['design'], r['mode'],
+                     *(step_label(r['steps'].get(stage)) for stage in stages)]
+                    for r in results)
+        w.write(tabulate(rows, headers=headers, tablefmt='github', disable_numparse=True))
         w.write('\n## All observed diagnostics, by design and stage\n\n')
         if setup_errors:
             w.write('### Setup failures\n\n')
@@ -425,8 +451,7 @@ def write_report(results: list[dict], setup_errors: dict[str, str],
                         w.write('```text\n' + instances[0]['text'].rstrip('\n') + '\n```\n\n')
             w.write('\n')
         w.write('## Residual IR operations (counts, not failure diagnoses)\n\n')
-        w.write('| Design | Mode | llhd.process | llhd.sig | llhd.drv | CF branches | sim.* | seq.firreg |\n')
-        w.write('|---|---|---:|---:|---:|---:|---:|---:|\n')
+        rows = []
         for r in results:
             step = r['steps'].get('lower_seq_sim')
             if step is None or step['status'] != 'ok':
@@ -434,9 +459,12 @@ def write_report(results: list[dict], setup_errors: dict[str, str],
             ops = step['ops']
             sim = sum(num for name, num in ops.items() if name.startswith('sim.'))
             cf = sum(num for name, num in ops.items() if name.startswith('cf.'))
-            w.write(f"| {r['design']} | {r['mode']} | {ops.get('llhd.process', 0)} | "
-                    f"{ops.get('llhd.sig', 0)} | {ops.get('llhd.drv', 0)} | "
-                    f"{cf} | {sim} | {ops.get('seq.firreg', 0)} |\n")
+            rows.append([r['design'], r['mode'], ops.get('llhd.process', 0),
+                         ops.get('llhd.sig', 0), ops.get('llhd.drv', 0),
+                         cf, sim, ops.get('seq.firreg', 0)])
+        w.write(tabulate(rows, headers=['Design', 'Mode', 'llhd.process', 'llhd.sig',
+                                        'llhd.drv', 'CF branches', 'sim.*', 'seq.firreg'],
+                         tablefmt='github'))
         w.write('\nCounts are text occurrences, not independently verified operation counts. '
                 'A remaining operation is not automatically an error or nonsynthesizable. '
                 'Failed imports are probed separately using `--ir-moore` to distinguish '
@@ -461,29 +489,44 @@ def write_report(results: list[dict], setup_errors: dict[str, str],
 
 
 def main() -> int:
+    global LB, BENCH, CORAL_BENCH
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--design', choices=['all', *DESIGNS], default='all')
+    parser.add_argument('--design', default='all',
+                        help='known or discovered benchmark name, or all')
+    parser.add_argument('--top', help='top module override (required for new designs)')
+    parser.add_argument('--logikbench-root', type=Path, default=LB)
+    parser.add_argument('--all-discovered', action='store_true',
+                        help='include discovered benchmarks beyond the eight known designs')
     parser.add_argument('--timeout', type=float, default=300,
                         help='seconds per tool invocation (default: 300)')
     parser.add_argument('--out', type=Path, default=DEFAULT_OUT)
-    parser.add_argument('--circt-bin', type=Path, default=CIRCT / 'build/bin')
+    parser.add_argument('--circt-bin', type=Path, default=Path(os.environ.get('CIRCT_BIN', str(CIRCT / 'build/bin'))))
     parser.add_argument('--only-default', action='store_true')
     parser.add_argument('--only-sroa', action='store_true')
     parser.add_argument('--skip-reimport', action='store_true',
                         help='skip parsing emitted SV back through circt-verilog')
-    parser.add_argument('--list', action='store_true', help='show exact manifests')
+    parser.add_argument('--list', action='store_true', help='list known and discovered designs')
     args = parser.parse_args()
+    LB = args.logikbench_root.expanduser().resolve()
+    BENCH = LB / 'logikbench/benchmarks/large'
+    CORAL_BENCH = LB / 'logikbench/benchmarks/microalchemy/coralnpu'
+    discovered = discover_designs()
+    available = set(DESIGNS) | set(discovered)
+    if args.design != 'all' and args.design not in available:
+        parser.error(f'Unknown design {args.design!r}; use --list')
+    if args.top and (args.design == 'all' or args.all_discovered):
+        parser.error('--top requires one specific --design')
     if args.only_default and args.only_sroa:
         parser.error('choose only one of --only-default / --only-sroa')
     if args.timeout <= 0:
         parser.error('--timeout must be positive')
     if args.list:
-        for name, (top, files, params, _) in DESIGNS.items():
-            if name == 'coralnpu':
-                top = resolve_coral_top(CORAL_BENCH)
-                print(f'{name}: top={top}; filelist={CORAL_BENCH / "filelist.f"}; params={params}')
-            else:
+        for name in sorted(available):
+            if name in DESIGNS:
+                top, files, params, _ = DESIGNS[name]
                 print(f'{name}: top={top}; files={", ".join(files)}; params={params}')
+            else:
+                print(f'{name}: discovered at {discovered[name]} (use --top MODULE)')
         return 0
     out = args.out.expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -491,7 +534,7 @@ def main() -> int:
     for tool in ('circt-verilog', 'circt-opt'):
         if not (tool_bin / tool).is_file():
             parser.error(f'Missing tool: {tool_bin / tool}')
-    designs = list(DESIGNS) if args.design == 'all' else [args.design]
+    designs = (sorted(available) if args.all_discovered else list(DESIGNS)) if args.design == 'all' else [args.design]
     modes = ['sroa'] if args.only_sroa else ['default'] if args.only_default else ['default', 'sroa']
     setup_errors: dict[str, str] = {}
     results: list[dict] = []
@@ -499,7 +542,7 @@ def main() -> int:
     if any(n in NEEDS_LAMBDA for n in designs):
         try:
             libs = library_dirs()
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, ImportError, ValueError) as exc:
             for name in designs:
                 if name in NEEDS_LAMBDA:
                     setup_errors[name] = 'lambdalib resolution failed: ' + str(exc)
@@ -518,7 +561,7 @@ def main() -> int:
                 print(f'[{design}] SETUP FAILED: {setup_errors[design]}', flush=True)
                 continue
             try:
-                spec = manifest(design, libs)
+                spec = manifest(design, libs, discovered, args.top)
             except (OSError, ValueError) as exc:
                 setup_errors[design] = str(exc)
                 print(f'[{design}] SETUP FAILED: {exc}', flush=True)
