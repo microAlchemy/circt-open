@@ -27,7 +27,7 @@ DEFAULT_OUT = Path(os.environ.get('DIAGNOSTICS_OUT', 'diagnostics')).expanduser(
 DEFAULT_DEFINES = ('SYNTHESIS', 'VERILINT', 'NO_PLI_OR_EMU', 'DESIGNWARE_NOEXIST')
 
 
-DESIGNS = {
+DESIGN_OVERRIDES = {
     'axicrossbar': ('axi_crossbar', (
         'arbiter.v', 'axi_crossbar_addr.v', 'axi_crossbar_rd.v',
         'axi_crossbar.v', 'axi_crossbar_wr.v', 'axi_register_rd.v',
@@ -135,7 +135,7 @@ def resolve_coral_top(root: Path) -> str:
 
 def manifest(name: str, libs: list[str] | None, discovered: dict[str, Path],
              top_override: str | None = None) -> dict:
-    top, filenames, parameters, defines = DESIGNS.get(name, (None, (), {}, ()))
+    top, filenames, parameters, defines = DESIGN_OVERRIDES.get(name, (None, (), {}, ()))
     if top_override:
         top = top_override
     if name == 'coralnpu':
@@ -156,7 +156,7 @@ def manifest(name: str, libs: list[str] | None, discovered: dict[str, Path],
         }
 
     root = discovered.get(name, BENCH / name)
-    if name not in DESIGNS:
+    if name not in DESIGN_OVERRIDES:
         if not top:
             raise ValueError(f'Unknown top for {name!r}; supply --top MODULE')
         filenames = tuple(str(p.relative_to(root / 'rtl')) for p in
@@ -511,7 +511,7 @@ def main() -> int:
     BENCH = LB / 'logikbench/benchmarks/large'
     CORAL_BENCH = LB / 'logikbench/benchmarks/microalchemy/coralnpu'
     discovered = discover_designs()
-    available = set(DESIGNS) | set(discovered)
+    available = set(DESIGN_OVERRIDES) | set(discovered)
     if args.design != 'all' and args.design not in available:
         parser.error(f'Unknown design {args.design!r}; use --list')
     if args.top and (args.design == 'all' or args.all_discovered):
@@ -522,8 +522,8 @@ def main() -> int:
         parser.error('--timeout must be positive')
     if args.list:
         for name in sorted(available):
-            if name in DESIGNS:
-                top, files, params, _ = DESIGNS[name]
+            if name in DESIGN_OVERRIDES:
+                top, files, params, _ = DESIGN_OVERRIDES[name]
                 print(f'{name}: top={top}; files={", ".join(files)}; params={params}')
             else:
                 print(f'{name}: discovered at {discovered[name]} (use --top MODULE)')
@@ -534,7 +534,7 @@ def main() -> int:
     for tool in ('circt-verilog', 'circt-opt'):
         if not (tool_bin / tool).is_file():
             parser.error(f'Missing tool: {tool_bin / tool}')
-    designs = (sorted(available) if args.all_discovered else list(DESIGNS)) if args.design == 'all' else [args.design]
+    designs = (sorted(available) if args.all_discovered else list(DESIGN_OVERRIDES)) if args.design == 'all' else [args.design]
     modes = ['sroa'] if args.only_sroa else ['default'] if args.only_default else ['default', 'sroa']
     setup_errors: dict[str, str] = {}
     results: list[dict] = []
