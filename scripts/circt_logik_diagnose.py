@@ -32,7 +32,7 @@ DESIGN_OVERRIDES = {
         'axi_crossbar.v', 'axi_crossbar_wr.v', 'axi_register_rd.v',
         'axi_register_wr.v', 'priority_encoder.v'), {}, ()),
     'blackparrot': ('black_parrot', ('pickled.v', 'lambda.v'), {}, ('SYNTHESIS',)),
-    'coralnpu': ('__resolve_from_compile_json__', (), {}, ('SYNTHESIS',)),
+    'coralnpu': (None, (), {}, ('SYNTHESIS',)),
     'qr': ('qr', ('qr_cordic.v', 'qr_boundary.v', 'qr_internal.v',
                  'qr_array.v', 'qr.v'), {'N': '16', 'DW': '16'}, ()),
     'rocket': ('rocket', ('rocket.v', 'riscv_bootrom.v'), {}, ()),
