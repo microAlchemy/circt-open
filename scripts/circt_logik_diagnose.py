@@ -243,24 +243,21 @@ def parse_diagnostics(path: Path) -> list[dict]:
         return []
     events: list[dict] = []
     active: dict | None = None
-    in_crash = False
     with path.open(errors='replace') as f:
         for lineno, raw in enumerate(f, 1):
             line = ANSI_RE.sub('', raw.rstrip('\n'))
             if CRASH_RE.search(line):
-                if not in_crash:
+                if active['kind'] != 'fatal error':
                     if active is not None:
                         events.append(active)
                     active = {'kind': 'fatal error', 'message': line.strip(),
                               'header': line, 'stderr_line': lineno,
                               'location': None, 'text': line + '\n'}
-                    in_crash = True
                 else:
                     active['text'] += line + '\n'
                 continue
             m = SEVERITY_RE.search(line)
             if m is not None:
-                in_crash = False
                 if active is not None:
                     events.append(active)
                 loc = LOCATION_RE.search(line)
