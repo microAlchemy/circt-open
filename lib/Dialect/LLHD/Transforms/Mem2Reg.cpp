@@ -1119,11 +1119,11 @@ void Promoter::mergeDuplicateProjections() {
         if (isProjection(&op) && !isInRegion(op.getOperand(0)))
           candidates.push_back(&op);
 
-    for (unsigned i = 0; i < candidates.size(); ++i) {
+    for (size_t i = 0; i < candidates.size(); ++i) {
       auto *kept = candidates[i];
       if (!kept)
         continue;
-      for (unsigned j = i + 1; j < candidates.size(); ++j) {
+      for (size_t j = i + 1; j < candidates.size(); ++j) {
         auto *other = candidates[j];
         if (!other ||
             !OperationEquivalence::isEquivalentTo(
