@@ -42,6 +42,12 @@
 
 ### Added
 
+- **`SegmentedMessageData::asMessageData(scratch)`** returns the message
+  itself if it is already a `MessageData`, otherwise flattens it into
+  `scratch`. It replaces the internal `detail::getMessageDataRef()` helper.
+  The default segmented `WriteChannelPort::write()` and `tryWrite()` use it,
+  so they no longer copy messages which are already a `MessageData`, and
+  `MessageData` gained (noexcept) move operations.
 - **Non-blocking segmented writes.** `WriteChannelPort` gains a virtual
   `bool tryWrite(std::unique_ptr<SegmentedMessageData> &msg)` and
   `TypedWritePort<T>` gains `bool tryWrite(std::unique_ptr<T> &data)`. They
@@ -97,6 +103,11 @@
 
 ### Fixed
 
+- **The accelerator service thread no longer dies on an exception** thrown by a
+  listener callback or task (including a module's `poll()`). It logs the
+  exception to the connection's logger (or, if constructed without a context,
+  to stderr) and carries on. `AcceleratorServiceThread`'s constructors take an
+  optional `Context *`.
 - **Cosim no longer drops frames sent before the simulator connects.** Frames
   sent to a simulator port which isn't connected yet are held by the server
   and handed over, in order, once it connects.
