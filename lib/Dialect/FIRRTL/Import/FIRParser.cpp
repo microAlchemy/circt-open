@@ -6115,12 +6115,13 @@ ParseResult FIRCircuitParser::parseClass(CircuitOp circuit, unsigned indent) {
   return skipToModuleEnd(indent);
 }
 
-/// domain ::= 'domain' id ':' info?
+/// domain ::= 'domain' id ':' info? (INDENT domain-field+ DEDENT)?
+/// domain-field ::= id ':' property-type info? NEWLINE
 ParseResult FIRCircuitParser::parseDomain(CircuitOp circuit, unsigned indent) {
+  LocWithInfo info(getToken().getLoc(), this);
   consumeToken(FIRToken::kw_domain);
 
   StringAttr name;
-  LocWithInfo info(getToken().getLoc(), this);
   if (parseId(name, "domain name") ||
       parseToken(FIRToken::colon, "expected ':' after domain definition") ||
       info.parseOptionalInfo())
@@ -6511,10 +6512,9 @@ ParseResult FIRCircuitParser::parseTypeDecl() {
 // Parse an option group declaration.
 ParseResult FIRCircuitParser::parseOptionDecl(CircuitOp circuit) {
   StringRef id;
-  consumeToken();
-  auto loc = getToken().getLoc();
-
   LocWithInfo info(getToken().getLoc(), this);
+  consumeToken();
+
   if (parseId(id, "expected an option group name") ||
       parseToken(FIRToken::colon,
                  "expected ':' after option group definition") ||
@@ -6538,7 +6538,7 @@ ParseResult FIRCircuitParser::parseOptionDecl(CircuitOp circuit) {
       return failure();
 
     if (!cases.insert(id).second)
-      return emitError(loc)
+      return emitError(caseInfo.getFIRLoc())
              << "duplicate option case definition '" << id << "'";
 
     OptionCaseOp::create(builder, caseInfo.getLoc(), id);
