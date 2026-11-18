@@ -4304,12 +4304,18 @@ ParseResult FIRStmtParser::parseDomainInstantiation() {
            << "unknown domain '" << domainKind.getValue() << "'";
 
   auto domainType = DomainType::getFromDomainOp(lookup->second);
+  auto fields = domainType.getFields();
 
   // Parse optional field values
   SmallVector<Value> fieldValues;
   if (consumeIf(FIRToken::l_paren)) {
     // Parse comma-separated list of expressions
     if (parseListUntil(FIRToken::r_paren, [&]() -> ParseResult {
+          if (fieldValues.size() >= fields.size())
+            return emitError(getToken().getLoc())
+                   << "too many field values for domain '"
+                   << domainKind.getValue() << "': expected " << fields.size();
+
           Value value;
           if (parseExp(value, "expected field value expression"))
             return failure();
@@ -4326,6 +4332,11 @@ ParseResult FIRStmtParser::parseDomainInstantiation() {
 
   if (parseOptionalInfo())
     return failure();
+
+  if (fieldValues.size() < fields.size())
+    return emitError(startLoc)
+           << "not enough field values for domain '" << domainKind.getValue()
+           << "': expected " << fields.size() << ", got " << fieldValues.size();
 
   locationProcessor.setLoc(startLoc);
   auto result =
