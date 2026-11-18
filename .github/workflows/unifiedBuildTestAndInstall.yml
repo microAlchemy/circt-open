@@ -128,6 +128,11 @@ on:
         description: "The GitHub runner to use"
         required: true
         type: string
+      runner_label:
+        description: "Optional repository-scoped GCP runner label for trusted Linux jobs"
+        required: false
+        type: string
+        default: ""
       cmake_build_type:
         required: true
         type: string
@@ -188,7 +193,7 @@ on:
 
 jobs:
   build-test-and-install:
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner_label || inputs.runner }}
     continue-on-error: ${{ inputs.allow_failure }}
     permissions:
       contents: write # Upload assets to release.
@@ -221,7 +226,7 @@ jobs:
           INPUT_ASSERTIONS: ${{ inputs.llvm_enable_assertions }}
           INPUT_EXTRA_CMAKE: ${{ inputs.extra_cmake_args }}
       - name: Free disk space
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !inputs.runner_label
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           android: true
@@ -434,9 +439,14 @@ jobs:
         if: steps.canonicalize.outputs.cmake_build_type == 'release'
         shell: bash
         run: |
-          runner_image_version=${ImageVersion?"Runner Image Version not set"}
+          runner_image_version=${ImageVersion:-}
+          if [ -z "$runner_image_version" ]; then
+            runner_image_version="$GCP_RUNNER_LABEL-$(uname -srm | tr ' ' '-')"
+          fi
           echo "Runner Image Version=${runner_image_version}"
           echo "image_version=${runner_image_version}" >> "$GITHUB_OUTPUT"
+        env:
+          GCP_RUNNER_LABEL: ${{ inputs.runner_label }}
       - name: sccache
         if: steps.canonicalize.outputs.cmake_build_type == 'release'
         uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23

@@ -17,7 +17,7 @@ jobs:
   # Do sanity check (clang-format and python-format) first.
   sanity-check:
     name: Sanity Check
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.GCP_CI_RUNNER_LABEL || 'ubuntu-latest' }}
     container:
       image: ghcr.io/circt/images/circt-ci-build:20260107030736
     steps:
@@ -147,7 +147,7 @@ jobs:
 
   # Choose the build/test matrix.
   choose-matrix:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.GCP_CI_RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
       # Clone CIRCT as shallow as possible.  We just need the `.github`
       # directory.
@@ -242,7 +242,9 @@ jobs:
       actions: write
     uses: ./.github/workflows/unifiedBuildTestAndInstall.yml
     with:
+      # The base runner still identifies the OS and toolchain in the reusable workflow.
       runner: ${{ matrix.generated.runner }}
+      runner_label: ${{ matrix.generated.runner == 'ubuntu-24.04' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.GCP_CI_RUNNER_LABEL || '' }}
       cmake_build_type: ${{ matrix.generated.cmake_build_type }}
       build_shared_libs: ${{ matrix.generated.build_shared_libs }}
       llvm_enable_assertions: ${{ matrix.generated.llvm_enable_assertions }}
@@ -269,7 +271,7 @@ jobs:
   # whether the build matrix passed.
   upload-dispatch-metadata:
     name: Upload Dispatch Metadata
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.GCP_CI_RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
       - name: Write PR number
         run: |
