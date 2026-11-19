@@ -9,8 +9,10 @@
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/LLHD/LLHDOps.h"
 #include "circt/Dialect/LLHD/LLHDPasses.h"
+#include "circt/Dialect/SV/SVOps.h"
 #include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "llvm/Support/Debug.h"
 
@@ -302,8 +304,64 @@ struct LowerProcessesPass
 };
 } // namespace
 
+/// Lower a single-block process that terminates without suspending to an
+/// sv.initial block. This handles initial blocks that check parameters and
+/// emit diags for sim, which may become straight-line processes after loop
+/// unrolling. Processes without observable effects are eliminated.
+static bool lowerOneShotProcess(ProcessOp processOp) {
+  auto &body = processOp.getBody();
+  if (!body.hasOneBlock())
+    return false;
+
+
+  auto &block = body.front();
+  auto haltOp = dyn_cast<HaltOp>(block.getTerminator());
+  if (!haltOp)
+    return false;
+  // Only move straight-line operations that do not depend on LLHD process
+  // semantics. Reject nested regions to avoid moving unexamined operations.
+  bool hasSideEffects = false;
+  for (auto &op : block.without_terminator()) {
+    auto *dialect = op.getDialect();
+    auto ns = dialect ? dialect->getNamespace() : "";
+    if (ns == "llhd" || op.getNumRegions() != 0)
+      return false;
+    if (isMemoryEffectFree(&op))
+      continue;
+    if (ns != "sv" && ns != "sim")
+      return false;
+    hasSideEffects = true;
+  }
+  // An initial block cannot yield SSA results. Live process results
+  // must be forwarded from values defined outside the process.
+  for (auto [result, yielded] :
+       llvm::zip(processOp.getResults(), haltOp->getOperands()))
+    if (!result.use_empty() && body.isAncestor(yielded.getParentRegion()))
+      return false;
+  // Preserve observable effects in an initial block. Otherwise, the process
+  // can be eliminated after forwarding its live results.
+  if (hasSideEffects) {
+    OpBuilder builder(processOp);
+    auto initialOp =
+        sv::InitialOp::create(builder, processOp.getLoc(), [] {});
+    auto *initialBlock = initialOp.getBodyBlock();
+    for (auto &op : llvm::make_early_inc_range(block.without_terminator()))
+      op.moveBefore(initialBlock, initialBlock->end());
+  }
+  for (auto [result, yielded] :
+       llvm::zip(processOp.getResults(), haltOp->getOperands()))
+    if (!result.use_empty())
+      result.replaceAllUsesWith(yielded);
+  processOp.erase();
+  return true;
+}
+
 void LowerProcessesPass::runOnOperation() {
   SmallVector<ProcessOp> processOps(getOperation().getOps<ProcessOp>());
+  for (auto processOp : processOps)
+    lowerOneShotProcess(processOp);
+
+  processOps = SmallVector<ProcessOp>(getOperation().getOps<ProcessOp>());
   for (auto processOp : processOps)
     Lowering(processOp).lower();
 }
