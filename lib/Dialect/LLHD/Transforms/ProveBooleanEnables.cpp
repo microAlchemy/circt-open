@@ -15,8 +15,8 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 
 #include <cstdint>
@@ -39,46 +39,34 @@ using namespace llhd;
 
 static constexpr unsigned maxLeafBits = 10;
 static constexpr unsigned maxConeOps = 256;
-
-/// Only traverse operations whose 2 state we can evaluate using
-/// their existing fold hooks.
+/// Support ops whose 2 states we can evaluate w/ their existing fold hooks.
 static bool isSupported(Operation *op) {
-  return isa<comb::AndOp, comb::OrOp, comb::XorOp, comb::ICmpOp,
-             comb::ConcatOp, comb::MuxOp, comb::ReplicateOp>(op);
+  return isa<comb::AndOp, comb::OrOp, comb::XorOp, comb::ICmpOp, comb::ConcatOp,
+             comb::MuxOp, comb::ReplicateOp>(op);
 }
 
 namespace {
 
-struct OperationDeleter {
-  void operator()(Operation *op) const { op->destroy(); }
-};
-
-/// Prove bounded LLHD enables by exhaustive two-state evaluation.
 class BooleanCone {
 public:
   std::optional<bool> prove(Value enable);
 
 private:
   bool collect(Value value);
-  std::optional<bool>
-  evaluate(uint64_t assignment,
-           const DenseMap<Value, Operation *> &clones,
-           DenseMap<Value, Attribute> &values) const;
+  std::optional<bool> evaluate(uint64_t assignment,
+                               const DenseMap<Value, Operation *> &clones,
+                               DenseMap<Value, Attribute> &values) const;
 
-  Value root;
-
-  /// Postorder: every operand is visited before its consumer.
+  Value theEnableWire;
+  /// Reverse, every operand is visited before its consumer.
   SmallVector<Value> order;
-
   /// For each opaque leaf, the assignment slot of each result bit.
   DenseMap<Value, SmallVector<unsigned>> leafSlots;
-
   /// Overlapping extracts share slots for identical underlying bits.
   DenseMap<std::pair<Value, unsigned>, unsigned> bitSlots;
   DenseSet<Value> visited;
   DenseSet<Value> visiting;
   DenseMap<Value, Attribute> constants;
-
   unsigned leafBits = 0;
   unsigned coneOps = 0;
 };
@@ -87,7 +75,8 @@ bool BooleanCone::collect(Value value) {
   if (visited.count(value))
     return true;
 
-  // An in-progress value is a dependency cycle, not a completed node.
+  // false if the value was already in visiting, walked back into a wire you’re
+  // still in the middle of resolving, rescursion.
   if (!visiting.insert(value).second)
     return false;
 
@@ -108,9 +97,9 @@ bool BooleanCone::collect(Value value) {
     return finish();
   }
 
+  // Supported operations are traversed recursively.
   Operation *op = value.getDefiningOp();
 
-  // Supported pure operations are traversed recursively.
   if (op && op->getNumResults() == 1 && isSupported(op)) {
     if (++coneOps > maxConeOps)
       return false;
@@ -118,7 +107,6 @@ bool BooleanCone::collect(Value value) {
     for (Value operand : op->getOperands())
       if (!collect(operand))
         return false;
-
     return finish();
   }
 
@@ -126,18 +114,14 @@ bool BooleanCone::collect(Value value) {
   auto type = dyn_cast<IntegerType>(value.getType());
   if (!type || !type.isSignless())
     return false;
-
   unsigned width = type.getWidth();
-
   if (width == 0)
     return false;
 
-  // Peel nested extracts to identify the underlying bit positions.
-  // Do not traverse other unsupported operations.
+  // unroll nested comb.extracts to id the underlying bit positions.
   Value base = value;
   unsigned lowBit = 0;
   DenseSet<Value> seenExtracts;
-
   while (auto extract = base.getDefiningOp<comb::ExtractOp>()) {
     if (!seenExtracts.insert(base).second)
       return false;
@@ -165,10 +149,10 @@ bool BooleanCone::collect(Value value) {
   return finish();
 }
 
-std::optional<bool> BooleanCone::evaluate(
-    uint64_t assignment,
-    const DenseMap<Value, Operation *> &clones,
-    DenseMap<Value, Attribute> &values) const {
+std::optional<bool>
+BooleanCone::evaluate(uint64_t assignment,
+                      const DenseMap<Value, Operation *> &clones,
+                      DenseMap<Value, Attribute> &values) const {
   for (Value value : order) {
     if (constants.count(value))
       continue;
@@ -206,8 +190,7 @@ std::optional<bool> BooleanCone::evaluate(
     SmallVector<OpFoldResult> results;
     LogicalResult status = copy->fold(operands, results);
 
-    // A successful in-place fold may mutate the clone. Abandon the
-    // entire proof instead of reusing a potentially modified operation.
+    // A successful in-place fold may mutate the clone. Abandon proof.
     if (failed(status) || results.size() != 1)
       return std::nullopt;
 
@@ -217,7 +200,7 @@ std::optional<bool> BooleanCone::evaluate(
     if (auto attr = folded.dyn_cast<Attribute>()) {
       result = attr;
     } else if (auto forwarded = folded.dyn_cast<Value>()) {
-      // Only forward original operands, whose values were evaluated.
+      // only forward original operands, whose values were evaluated.
       if (llvm::is_contained(op->getOperands(), forwarded)) {
         auto it = values.find(forwarded);
         if (it != values.end())
@@ -225,31 +208,35 @@ std::optional<bool> BooleanCone::evaluate(
       }
     }
 
-    // Abandon unsupported fold, or non-integer result.
+    // Abandon non-integer result.
     if (!isa_and_nonnull<IntegerAttr>(result))
       return std::nullopt;
 
     values[value] = result;
   }
 
-  auto result = dyn_cast_or_null<IntegerAttr>(values.lookup(root));
-  if (!result || result.getType() != root.getType())
+  auto result = dyn_cast_or_null<IntegerAttr>(values.lookup(theEnableWire));
+  if (!result || result.getType() != theEnableWire.getType())
     return std::nullopt;
 
   return result.getValue().getBoolValue();
 }
+
+struct OperationDeleter {
+  void operator()(Operation *op) const { op->destroy(); }
+};
 
 std::optional<bool> BooleanCone::prove(Value enable) {
   auto type = dyn_cast<IntegerType>(enable.getType());
   if (!type || !type.isSignless() || type.getWidth() != 1)
     return std::nullopt;
 
-  root = enable;
+  theEnableWire = enable;
 
   if (!collect(enable))
     return std::nullopt;
 
-  // Own detached clones for the entire proof, including early exits.
+  // Own detached clones for the entire proof.
   SmallVector<std::unique_ptr<Operation, OperationDeleter>> ownedClones;
   DenseMap<Value, Operation *> clones;
 
@@ -262,7 +249,7 @@ std::optional<bool> BooleanCone::prove(Value enable) {
     clones[value] = copy;
   }
 
-  // Constants are fixed; leaves and computed values are overwritten
+  // Constants are fixed; leaves and computed values overwritten
   // in dependency order on every assignment.
   DenseMap<Value, Attribute> values = constants;
 
@@ -270,8 +257,7 @@ std::optional<bool> BooleanCone::prove(Value enable) {
 
   std::optional<bool> firstResult;
 
-  for (uint64_t assignment = 0; assignment < combinations;
-       ++assignment) {
+  for (uint64_t assignment = 0; assignment < combinations; ++assignment) {
     auto result = evaluate(assignment, clones, values);
 
     if (!result)
@@ -282,7 +268,6 @@ std::optional<bool> BooleanCone::prove(Value enable) {
       continue;
     }
 
-    // break early.
     if (*result != *firstResult)
       return std::nullopt;
   }
@@ -290,13 +275,9 @@ std::optional<bool> BooleanCone::prove(Value enable) {
   return firstResult;
 }
 
-//===----------------------------------------------------------------------===//
-// Pass
-//===----------------------------------------------------------------------===//
-
+// PASS
 struct ProveBooleanEnablesPass
-    : public llhd::impl::ProveBooleanEnablesPassBase<
-          ProveBooleanEnablesPass> {
+    : public llhd::impl::ProveBooleanEnablesPassBase<ProveBooleanEnablesPass> {
   void runOnOperation() override;
 };
 
@@ -306,8 +287,7 @@ void ProveBooleanEnablesPass::runOnOperation() {
   DenseMap<Value, std::optional<bool>> proofCache;
   SmallVector<DriveLikeOp> candidates;
 
-  getOperation().walk(
-      [&](DriveLikeOp op) { candidates.push_back(op); });
+  getOperation().walk([&](DriveLikeOp op) { candidates.push_back(op); });
 
   for (DriveLikeOp op : candidates) {
     Value enable = op.getEnable();
@@ -322,15 +302,13 @@ void ProveBooleanEnablesPass::runOnOperation() {
     if (!result)
       continue;
 
-    LLVM_DEBUG(llvm::dbgs()
-               << "Proved enable " << (*result ? "true" : "false")
-               << " for " << op->getName() << "\\n");
+    LLVM_DEBUG(llvm::dbgs() << "Proved enable " << (*result ? "true" : "false")
+                            << " for " << op->getName() << "\\n");
 
     if (!*result) {
       op->erase();
       continue;
     }
-
     op.getEnableMutable().clear();
   }
 }
