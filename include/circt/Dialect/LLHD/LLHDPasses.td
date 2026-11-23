@@ -72,6 +72,7 @@ def HoistNetsPass : Pass<"llhd-hoist-nets", "hw::HWModuleOp"> {
 
 def LowerProcessesPass : Pass<"llhd-lower-processes", "hw::HWModuleOp"> {
   let summary = "Convert process ops to combinational ops where possible";
+  let dependentDialects = ["sv::SVDialect"];
 }
 
 def DeseqPass : Pass<"llhd-deseq", "hw::HWModuleOp"> {
